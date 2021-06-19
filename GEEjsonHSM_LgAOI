@@ -1,0 +1,404 @@
+//////////////////////////////////////////////////////////////////////////////////
+//////// == MODELING RARE PLANT HABITAT - 2021 - DREW FOSTER == //////////////////
+//////////////////////////////////////////////////////////////////////////////////
+
+/* 
+This is example code, based on Drew Foster's MS Thesis,
+modeling suitable habitat for the endangered plant, Hackelia venusta.
+
+No species occurrence data is provided to protect the sensitive location of the focal species.
+This code will not work, but meant to provide an example template of how model was created and ran
+in the Google Earth Engine Environment.
+*/
+
+//  // == AOI for focal species == // //
+
+var AOI = ee.Geometry.Polygon(
+        [[[-120.8427403266827, 47.664031236065775],
+          [-120.8427403266827, 47.527665050204874],
+          [-120.68069198683895, 47.527665050204874],
+          [-120.68069198683895, 47.664031236065775]]]);
+
+// // == LOAD Presence-Absence DATA FOR TRAINING MODEL == // //
+
+// Presence-Absence data not shown here, see above
+
+
+// // == LOAD ELEVATION DATA FOR SLOPE AND ASPECT CALCULATION == // //
+
+  // Load NED dataset
+var elevation = ee.Image('USGS/NED');
+print('Elevation:', elevation);
+Map.addLayer(elevation, {min: 350, max: 1800, gamma: 1.0}, 'NED', false);
+
+  // Calculate slope and aspect
+  // Run ee.Terrain.products() to get all three topographic products
+  // where bands: [1: "slope", 2: "aspect", 3: "hillshade"]
+  // Add layer with slope and aspect
+var topoMetrics = ee.Terrain.products(elevation);
+
+print('Topo Metrics', topoMetrics);
+Map.addLayer(topoMetrics, {"opacity":1,"bands":["hillshade"],"gamma":1}, 'NED Topo', false);
+
+
+// // == LOAD LANDCOVER DATA == // //
+
+  // Load most recent 2016 NLCD data for vegetation cover metrics
+  // See https://www.mrlc.gov/data/legends/national-land-cover-database-2016-nlcd2016-legend for landcover classes
+var nlcd = ee.Image('USGS/NLCD/NLCD2016');
+var landcover = nlcd.select('landcover');
+
+// Visualise land cover classes
+var landcoverVis = {
+  min: 0.0,
+  max: 95.0,
+  palette: [
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '466b9f',
+    'd1def8',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    'dec5c5',
+    'd99282',
+    'eb0000',
+    'ab0000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    'b3ac9f',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '68ab5f',
+    '1c5f2c',
+    'b5c58f',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    'af963c',
+    'ccb879',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    'dfdfc2',
+    'd1d182',
+    'a3cc51',
+    '82ba9e',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    'dcd939',
+    'ab6c28',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    'b8d9eb',
+    '000000',
+    '000000',
+    '000000',
+    '000000',
+    '6c9fb8'
+  ],
+};
+
+Map.addLayer(landcover, landcoverVis, 'NLCD Landcover', false);
+
+
+// // == LOAD SATELLITE IMAGERY == // //
+
+//////////////////////////////////////////////////////////////
+// Load Sentinel 2 Level 1 data, filter out clouds for 2020 //
+//////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////
+// This example uses the Sentinel-2 QA band to cloud mask
+// the collection.  The Sentinel-2 cloud flags are less
+// selective, so the collection is also pre-filtered by the
+// CLOUDY_PIXEL_PERCENTAGE flag, to use only relatively
+// cloud-free granule.
+/////////////////////////////////////////////////////////////
+
+// Function to mask clouds using the Sentinel-2 QA band.
+function maskS2clouds(image) {
+  var qa = image.select('QA60')
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(
+             qa.bitwiseAnd(cirrusBitMask).eq(0))
+
+  // Return the masked and scaled data, without the QA bands.
+  return image.updateMask(mask).divide(10000)
+      .select("B.*")
+      .copyProperties(image, ["system:time_start"])
+}
+
+
+// ===== 2019 COMPOSITE ===== //
+
+// Map the function over one year of data and take the median.
+// Load Sentinel-2 TOA reflectance data.
+var collection = ee.ImageCollection('COPERNICUS/S2')
+    .filterDate('2019-05-01', '2019-09-30')
+    .filterBounds(AOI)
+    // Pre-filter to get less cloudy granules.
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .map(maskS2clouds)
+
+var composite = collection.median()
+print("median composite s2", composite)
+
+// clip to AOI extent for easier viewing
+var s2clip = composite.clip(AOI);
+
+// Display the results.
+Map.addLayer(s2clip, {bands: ['B4', 'B3', 'B2'], min: 0, max: 0.3}, 'S2 AOI', false);
+
+
+/////////////////////
+// S-2 VEG INDICES //
+/////////////////////
+
+//=========================================================
+// SAVI = (1.5 * (NIR - Red)/(NIR + Red + 0.5))                   // Soil Adjusted Vegetation Index
+// NDVI = ((NIR - Red)/(NIR + Red))                               // Normalized Difference Vegetation Index
+// NDBI = ((SWIR1 - NIR)/(SWIR1 + NIR))                           // Normalized Difference Built Index
+//  BSI = ((Red+SWIR) - (NIR+Blue)) / ((Red+SWIR) + (NIR+Blue))   // Bare Soil Index
+// VDVI = ((2 * Green) - Red - Blue / (2 * Green) + Red + Blue)   // Visible-Band Difference Vegetation Index
+//=========================================================
+
+
+var blue = composite.select('B2');
+var green = composite.select('B3');
+var red = composite.select('B4');
+var nir = composite.select('B8');
+var swir = composite.select('B11');
+
+
+var ndvi = (nir.subtract(red)).divide((nir.add(red))).rename('NDVI');
+var vdvi = ((green.multiply(2)).subtract(red).subtract(blue))
+            .divide((green.multiply(2)).add(red).add(blue))
+            .rename('VDVI');
+var savi = (nir.subtract(red).divide(nir.add(red).add(0.5)))
+              .multiply(1.5).rename('SAVI')
+var ndbi = (swir.subtract(nir)).divide((swir.add(nir)))
+                    .rename('NDBI');
+var bsi = ((red.add(swir)).subtract(nir.add(blue)))
+              .divide((red.add(swir)).add(nir.add(blue)))
+                    .rename('BSI');
+
+print('NDVI:', ndvi);
+print('VDVI:', vdvi);
+
+Map.addLayer(ndvi.clip(AOI),
+                    {min: -1, max:1}, "NDVI", false);
+Map.addLayer(vdvi.clip(AOI),
+                    {min: -1, max:1}, "VDVI", false);
+Map.addLayer(savi.clip(AOI),
+                    {min: -1, max:1}, "SAVI", false);
+Map.addLayer(ndbi.clip(AOI),
+                    {min: -1, max:1}, "NDBI", false);
+Map.addLayer(bsi.clip(AOI), 
+                    {min: -1, max: 1},"BSI",false);
+
+// // == Load and Analyze Sentinel 1 SAR data for  2019 == // //
+// Load the Sentinel-1 ImageCollection.
+var sentinel1 = ee.ImageCollection('COPERNICUS/S1_GRD');
+  
+// Filter by metadata properties.
+var vh2019 = sentinel1.filterDate('2019-05-01', '2019-09-30')
+  // Filter to get images with VV and VH dual polarization.
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  // Filter to get images collected in interferometric wide swath mode.
+  .filter(ee.Filter.eq('instrumentMode', 'IW'));
+
+// Filter to get images from different look angles.
+var vh2019Ascending = vh2019.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+var vh2019Descending = vh2019.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+
+// Create a composite from means at different polarizations and look angles.
+var compositeS12019 = ee.Image.cat([
+  vh2019Ascending.select('VH').mean(),
+  ee.ImageCollection(vh2019Ascending.select('VV').merge(vh2019Descending.select('VV'))).mean(),
+  vh2019Descending.select('VH').mean()
+]).focal_median();
+
+// Get scale of Sentinel-1 SAR data
+var scaleS1 = compositeS12019.projection().nominalScale();
+print('S1 scale in meters: ', scaleS1);
+Map.addLayer(compositeS12019.clip(AOI), {min: [-25, -20, -25], max: [0, 10, 0]}, 'composite S1',false);
+
+
+// // DISPLAY BOUNDING BOX AND TRAINING POINTS // //
+Map.addLayer(AOI, {}, "AOI");
+Map.centerObject(AOI, 12);
+
+// // ** No presence-absence data loaded for this example **
+// print("Presence", presence);
+// print("Absence", absence);
+// Map.addLayer(presence, {color:'66ff00'}, "Presence");
+// Map.addLayer(absence, {color:'A9A9A9'}, "Absence");
+
+
+
+//////////////////////////////////////////////
+// // == RUN CLASSIFICATION ALGORITHM == // //
+//////////////////////////////////////////////
+
+// Training Data
+
+//  // Merge training data features; *NOTE: this step won't work for this example
+// var combined = presence.merge(absence);
+// print('training points', combined);
+
+// S2 Bands: B2-Blue; B3-Green; B4-Red; B8-NIR; 
+
+// Predictor Variables for classified image
+var classifyImage=(composite.select(['B2','B3', 'B4', 'B8'])
+                                .addBands(nlcd.select(['landcover', 'percent_tree_cover']))
+                                .addBands(topoMetrics.select(['slope', 'aspect', 'elevation']))
+                                .addBands(ndvi.select(['NDVI']))
+                                .addBands(compositeS12019.select(['VV','VH']))
+                                .addBands(ndbi.select(['NDBI']))
+                                .addBands(bsi.select(['BSI']))
+                                .addBands(savi.select(['SAVI']))
+                                );
+// print('Composite to Classify', classifyImage);
+
+var Palette = [
+   'c6c6c6', // grey - Absence
+   '00c44e' // green - Presence
+  ];
+
+var training = classifyImage.sampleRegions({
+collection: combined,
+properties: ['Class'],
+scale: 10
+});
+print('training rois ', training);
+
+//  Train a Random Forest Classifier
+var classifier = ee.Classifier.smileRandomForest(100).train({
+  features: training,
+  classProperty: 'Class'
+  });
+print('S2 RF AOI, explained', classifier.explain());
+
+// Classify the composite feature
+var classified = classifyImage.classify(classifier);
+Map.addLayer(classified.clip(AOI),{min:0,max:1, palette: Palette},'S2 Large AOI Classified', false);
+
+var bands = ['B2', 'B3', 'B4', 'B8', 
+// 'landcover', 
+'slope', 'aspect']
+
+
+// // == RUN STATS & ACCURACY ASSESSMENT == // //
+
+var trainAccuracy = classifier.confusionMatrix();
+print('S2 large Resubstitution error matrix: ', trainAccuracy);
+print('S2 large Training overall accuracy: ', trainAccuracy.accuracy());
+
+// Subset data and rerun
+
+var withRandom = training.randomColumn('random');
+var split = 0.7; // split 70% training, 30% testing
+var trainingPartition = withRandom.filter(ee.Filter.lt('random', split));
+var testingPartition = withRandom.filter(ee.Filter.gte('random', split));
+
+// Trained with 70% of data
+var trainedClassifier = ee.Classifier.smileRandomForest(100).train({
+  features: trainingPartition,
+  classProperty: 'Class',
+  inputProperties: bands
+});
+
+// Classify the test FeatureCollection
+var test = testingPartition.classify(trainedClassifier);
+
+// Print confusion matrix
+var confusionMatrix = test.errorMatrix('Class', 'classification');
+print('S2 Confusion Matrix:', confusionMatrix);
+print('S2 Test accuracy:', confusionMatrix.accuracy());
+
+
+  // Calculate Area for each class
+var stats = ee.Image.pixelArea().multiply(0.000001).addBands(classified).reduceRegion({
+  reducer: ee.Reducer.sum().group({
+    groupField: 1,
+    groupName: 'class',
+  }),
+  geometry: AOI,
+  scale: 10,
+  maxPixels:10e9
+});
+
+print('Area per class (km2)', stats);
+
+  // Export the image to Google Drive.
+var classifiedClip = classified.clip(AOI);  
+
+// Export.image.toDrive({
+//   image: classified,
+//   description: 'RFs2hsmGEE',
+//   folder: 'envtalCoVars',
+//   scale: 10,
+//   region: AOI,
+//   fileFormat: 'GeoTIFF',
+//   maxPixels: 1e10
+// });
